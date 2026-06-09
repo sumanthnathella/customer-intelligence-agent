@@ -240,31 +240,107 @@ two-prop z-test → p = 0.0003                    (significant after BH-FDR)
 > We require at least 30 (`DRIVER_MIN_SUPPORT`) so we do not trust a pattern
 > built on 3 or 4 contacts.
 >
-> **p = 0.0003** — a statistical test asking: "Could this 2.1× pattern be a fluke?"
-> The answer: probably not. In a world where acme has no real relationship to
-> duplicate charges, a gap this large would happen by random chance less than
-> 0.03% of the time.
+> **What are we actually testing?** The pipeline runs a **two-proportion z-test**.
+> It compares two groups:
 >
-> **Benjamini–Hochberg (BH-FDR):** The pipeline tests thousands of
-> `(dimension, value)` pairs (every vendor, every fulfillment type, every
-> region, etc.). By chance alone, some will look significant. BH-FDR is a
-> correction that raises the bar so that, across all tests, false positives
-> stay below 5%. Even after this stricter bar, `acme_marketplace` still passes.
+> | Group | Total contacts | Contacts about duplicate charges | Rate |
+> |-------|---------------|----------------------------------|------|
+> | **acme_marketplace** | 1,805 | 470 | **26.0%** |
+> | **All other vendors** | 8,195 | 770 | **9.4%** |
+>
+> The gap is **16.6 percentage points** (26.0% − 9.4%).
+>
+> **The null hypothesis:** "acme has no special relationship to duplicate charges.
+> The 26.0% and 9.4% rates are just random sampling noise — if we had a bigger
+> dataset, both groups would converge to the same true rate."
+>
+> **The test:** "Assuming the null hypothesis is true, what is the probability
+> of observing a gap of 16.6 points or larger purely by chance?"
+>
+> **The answer: p = 0.0003 (0.03%).**
+>
+> In other words: if acme truly had nothing to do with duplicate charges, and
+> we ran this experiment thousands of times, we would see a gap this extreme
+> only 3 times out of 10,000. That is strong evidence the gap is **real**, not a fluke.
+>
+> **Benjamini–Hochberg (BH-FDR):** Why do we need this?
+>
+> The pipeline tests **thousands** of `(dimension, value)` pairs. Every vendor,
+> every fulfillment type, every region, every payment method, every carrier —
+> for every L5. If we declared anything with `p < 0.05` as "significant," we'd
+> be flooded with false positives. Here's why:
+>
+> | Tests run | Random "significant" at p<0.05 (false positives) |
+> |-----------|---------------------------------------------------|
+> | 100       | ~5 by pure chance |
+> | 1,000     | ~50 by pure chance |
+> | 5,000     | ~250 by pure chance |
+>
+> **The problem:** without correction, ~250 of your "significant drivers" would
+> be total noise. You'd waste engineering time chasing ghosts.
+>
+> **What BH-FDR does:** It re-adjusts every p-value based on how many tests
+> you ran. The more tests, the stricter the bar becomes. After adjustment, we
+> only keep a driver if `corrected_p < 0.05`. This guarantees that, among all
+> the drivers you call "significant," no more than 5% are expected to be false.
+>
+> For `acme_marketplace`, the raw p-value was 0.0003. After BH-FDR correction
+> across thousands of tests, it gets adjusted upward (made more conservative) but
+> still stays well below 0.05. It survives the stricter bar. A borderline case
+> with a raw p-value of 0.04 would not — the correction would push it above 0.05
+> and it would be discarded as likely noise.
 
 Same for `fulfillment_type=3p_marketplace` → lift `1.7×`, support `508`, `p=0.0011`.
 
 ---
 
-**5. Sub-themes** (`subthemes.py`) — TF-IDF distinctive phrases for *this L5 vs the
-rest of the corpus*, each with a count, share, and representative quote. `c_001`'s
-wording lands in the top theme:
+**5. Sub-themes** (`subthemes.py`) — runs **once per analytics run**, after
+severity, z-scores, and drivers are computed but before everything is written to
+gbrain. It turns "1,240 duplicate-charge contacts" into the specific sub-issues
+customers actually mention, mined directly from transcript text.
+
+**How it works (no LLM, fully deterministic):**
+
+1. **Build a vocabulary** across the entire corpus. Extract 1-word and 2-word
+   phrases, strip English stop-words ("the", "and") plus domain stop-words
+   ("please", "sorry", "DM us", "thanks", "team", "reach out"). Only keep
+   phrases that appear in at least 5 contacts but fewer than 40% of all contacts.
+
+2. **Fit TF-IDF once on the whole corpus.** TF-IDF measures how *important* a
+   phrase is in a document relative to the whole collection. A phrase that appears
+   frequently in one pain point but rarely elsewhere gets a high score.
+
+3. **For each L5, compute distinctiveness:**
+   ```
+   distinctiveness = mean TF-IDF inside this L5  −  mean TF-IDF in all other L5s
+   ```
+   A high positive number means: "This phrase is unusually common *here* and
+   unusually rare *everywhere else*."
+
+4. **Keep the top non-overlapping phrases.** If "charged my card" and "charged my
+   card twice" are both candidates, keep only the longer one. Skip phrases that
+   appear in fewer than 4 contacts.
+
+5. **Attach a representative quote.** For each kept phrase, find the
+   highest-severity contact that mentions it. Compress that contact to its most
+   relevant sentence. That becomes the quote.
+
+**For this L5:**
 
 ```
 • "double charged on a single order"  — 312 contacts (25%)
      quote: "charged my card twice for an order that never shipped"
-• "refund not received"               — 204 contacts (16%)
+     why: highest-distinctiveness phrase; appears in 312 contacts but is
+          rare in every other L5.
+• "refund not received"             — 204 contacts (16%)
      quote: "want my money back or I'm closing my account"
+     why: second-highest distinctiveness; a separate issue within the same L5.
 ```
+
+> **Why this matters:** The L5 tells you the *bucket* ("duplicate charge").
+> Sub-themes tell you *what is actually happening inside it* — battery issues vs
+> cracked screens, or in this case double-charging vs missing refunds. You get
+> the specific words customers use and a real quote to investigate with.
 
 ---
 
@@ -275,6 +351,22 @@ dimension (share = % of *this L5's* contacts; lift from step 4):
 vendor           = acme_marketplace  →  470/1,240 = 38%,  2.1× (over-indexed)
 fulfillment_type = 3p_marketplace    →  508/1,240 = 41%,  1.7× (over-indexed)
 ```
+
+> **Why this helps:** This answers the question: "*Who* is getting hit, and *where*
+> should I focus?" It turns a raw number (1,240 duplicate-charge complaints) into
+> a **composition** — a profile of the pain point.
+>
+> - **38% from acme** — more than 1 in 3 complaints involve one vendor. That is
+>   a narrow surface area. You do not need to overhaul your whole billing system;
+>   you need to talk to acme.
+>
+> - **41% from 3p_marketplace** — marketplace fulfillment is also over-represented.
+>   Combined with acme, you have a clear operational pattern: the issue clusters
+>   around third-party marketplace orders handled by acme.
+>
+> Without this breakdown, you would see "1,240 duplicate charges" and have no
+> idea where to start. With it, you know exactly which vendor and fulfillment
+> type to investigate first.
 
 ---
 

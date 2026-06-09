@@ -1,0 +1,21 @@
+# Secrets
+.env
+
+# Data + artifacts (never commit)
+data/
+*.csv
+*.parquet
+gbrain/store/*.db
+gbrain/store/snapshots/
+reports/*.md
+reports/*.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store

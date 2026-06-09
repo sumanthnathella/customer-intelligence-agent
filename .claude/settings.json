@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "#!/bin/bash\n# Block staging raw data or the gbrain DB.\nif git diff --cached --name-only 2>/dev/null | grep -E '(^|/)(data/|.*\\.csv$|gbrain/store/.*\\.db$|.*\\.parquet$)'; then echo '[Hook] Refusing to stage data/artifact files. Add them to .gitignore.' >&2; exit 2; fi"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "#!/bin/bash\n# Enforce the two-plane import boundary (see .claude/rules/common.md #2).\nf=\"$CLAUDE_FILE_PATH\"\ncase \"$f\" in\n  */tagging/*.py) grep -nE 'import[[:space:]]+agent|from[[:space:]]+agent' \"$f\" && echo '[Hook] tagging/ must not import agent/.' >&2 ;;\n  */agent/*.py) grep -nE 'import[[:space:]]+tagging|from[[:space:]]+tagging' \"$f\" && echo '[Hook] agent/ must not import tagging/. Read from gbrain instead.' >&2 ;;\nesac\nexit 0"
+          }
+        ]
+      }
+    ]
+  }
+}

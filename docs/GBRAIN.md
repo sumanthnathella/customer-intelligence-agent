@@ -37,6 +37,13 @@ snapshot(run_id) -> path                 # JSON export of the run
 **Default engine = SQLite + JSON snapshots** (portable, zero services). The contract leaves room for a
 `pgvector` engine later for multi-user/shared deployments.
 
+> **Production swap:** `GBrainStore` is an interface class (`gbrain/store.py`) with
+> methods like `upsert_node`, `add_edge`, `query`, `traverse`. SQLite is the v1
+> implementation because it is zero-ops, single-file, and Python-native. To scale
+> to millions of conversations, swap in a BigQuery or Neo4j backend by implementing the
+> same interface — only the store class changes; `analytics/`, `agent/`, and
+> `retrieval.py` are untouched.
+
 ## Node types
 
 | Node | Key | Notable props |
@@ -46,6 +53,7 @@ snapshot(run_id) -> path                 # JSON export of the run
 | `dimension` | `dim:value` | dimension name, value (e.g. `carrier:FedEx`); discovered from the data, not hardcoded |
 | `exemplar` | `transcript_id` | snippet, severity, sentiment, week, brand |
 | `insight` | `insight_id` | summary, root_cause, recommended_action, status, run_id, evidence[] |
+| `verification` | SHA1 of `l5_id|claim` | claim, verdict ("verified" / "unsupported"), detail {lift, support, p_value}, evidence_ids, run_id |
 | `run` | `run_id` | window, n_transcripts, pack_version, created_at |
 
 `pain_point` carries **rolling, updatable** props: `total_volume`, `severity_avg`, `latest_zscore`,
@@ -63,6 +71,8 @@ the per-period history lives in `period_metric` nodes.
 | `exemplified_by` | pain_point → exemplar | representative transcript |
 | `explains` | insight → pain_point | an insight about a pain point |
 | `cites` | insight → exemplar / period_metric | evidence backing the insight |
+| `verifies` | verification → pain_point | a claim verified against data for this pain point |
+| `cites` | verification → dimension | evidence dimension cited in the verification |
 | `co_occurs` | pain_point → pain_point | appear together in conversations |
 
 ## The write loop (per run) — update by L5
@@ -78,6 +88,26 @@ analyze → upsert L5 entity → append period_metric → update affects(driver)
 - **Auto-link** (no LLM): taxonomy path → `child_of`; high z-score period → `spiked_in`; shared
   conversations → `co_occurs`. Cheap and always fresh.
 - **Accumulation**: the brain gets richer as test batches stream in — same entities, more history.
+
+## Verification cache
+
+After driver analysis, the pipeline takes the top 3 drivers per L5 and
+**re-checks them** (`lift > 1` ∧ `support ≥ 30` ∧ `significant = True`) before
+writing them to the report. This is a defense against bugs producing bogus
+drivers.
+
+A `verification` node is persisted for each checked driver:
+```
+claim:    "vendor=acme_marketplace over-indexes for duplicate_charge"
+verdict:  "verified" | "unsupported"
+detail:   {lift, support, p_value, dimension, value}
+evidence: ["dim:vendor:acme_marketplace"]
+run_id:   "run_2024_05_14_001"
+```
+
+This creates an **audit trail**. If a stakeholder asks "Why did you say acme
+is a driver?", you point to the stored record. The claim, evidence, and
+verdict are all traceable — not just an assertion in a report.
 
 ## Hybrid retrieval (`gbrain/retrieval.py`)
 

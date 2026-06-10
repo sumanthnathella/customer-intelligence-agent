@@ -40,7 +40,12 @@ Chronological record of design decisions. Locked = agreed; Open = needs sign-off
 
 ## Open
 
-_None blocking. Future: pgvector engine for shared brains; taxonomy migration job across pack versions._
+| # | Question | Status |
+|---|----------|--------|
+| O10 | **Staleness / versioning semantics.** How long is a driver edge valid? What happens when a new run contradicts a prior insight (e.g. lift drops from 2.1× to 1.3×)? No deprecation policy for L5s when taxonomy changes. | Design `validity_window` on `affects` edges + `versioning.md` doc. |
+| O11 | **Feedback loop.** No way for a user to say "this driver is not actionable" or "we already fixed this." No tracking of action taken / effectiveness → brain doesn't learn. | Design lightweight `action_taken` schema (action, outcome, timestamp); defer impl until product needs it. |
+
+_Future: pgvector engine for shared brains; taxonomy migration job across pack versions._
 
 ## Inspirations referenced
 gbrain (graph memory, schema packs, write→auto-link loop) · ECC (harness: skills/agents/rules/hooks)

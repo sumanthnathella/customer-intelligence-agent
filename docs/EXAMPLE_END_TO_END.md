@@ -341,6 +341,16 @@ customers actually mention, mined directly from transcript text.
 > Sub-themes tell you *what is actually happening inside it* — battery issues vs
 > cracked screens, or in this case double-charging vs missing refunds. You get
 > the specific words customers use and a real quote to investigate with.
+>
+> **Future upgrade — LLM-based theme canonicalization (v2):**
+> If TF-IDF themes feel too fragmented (e.g. "double charged" and "overbilled"
+> treated as separate), an LLM pass can canonicalize them. Modern LLMs with
+> large context windows can ingest batched transcripts directly, extract themes
+> in natural language, and collapse near-duplicates into canonical labels.
+> No embeddings or clustering required — the LLM reads the raw text, proposes
+> themes, and maps each contact to the closest theme. This is kept as a
+> future enhancement; TF-IDF is the v1 baseline because it is deterministic,
+> fast, and requires no LLM calls at scale.
 
 ---
 
@@ -352,39 +362,139 @@ vendor           = acme_marketplace  →  470/1,240 = 38%,  2.1× (over-indexed)
 fulfillment_type = 3p_marketplace    →  508/1,240 = 41%,  1.7× (over-indexed)
 ```
 
-> **Why this helps:** This answers the question: "*Who* is getting hit, and *where*
-> should I focus?" It turns a raw number (1,240 duplicate-charge complaints) into
-> a **composition** — a profile of the pain point.
->
-> - **38% from acme** — more than 1 in 3 complaints involve one vendor. That is
->   a narrow surface area. You do not need to overhaul your whole billing system;
->   you need to talk to acme.
->
-> - **41% from 3p_marketplace** — marketplace fulfillment is also over-represented.
->   Combined with acme, you have a clear operational pattern: the issue clusters
->   around third-party marketplace orders handled by acme.
->
-> Without this breakdown, you would see "1,240 duplicate charges" and have no
-> idea where to start. With it, you know exactly which vendor and fulfillment
-> type to investigate first.
+**How to read one line:**
+
+```
+                    ┌─ share = 470 / 1,240 = 38%
+                    │   (of all duplicate-charge contacts, 38% are acme)
+vendor = acme_marketplace ─┤
+                    └─ lift = 2.1×
+                        (acme contacts are 2.1× more likely to be
+                         duplicate-charge than random chance)
+```
+
+**Two numbers, two different questions:**
+
+| Number | Question it answers | Example |
+|--------|---------------------|---------|
+| **Share** | "What % of *this pain point's* contacts have this property?" | 38% of duplicate-charge complaints are acme |
+| **Lift** | "Is that share unusually high compared to the whole population?" | Yes — 2.1× more than random |
+
+**Why both matter:**
+
+- **Share alone is misleading.** If acme is 90% of your business, seeing 38% acme
+  in this pain point is not interesting — it is just proportionate. The lift
+  tells you this is *not* proportionate; it is a genuine concentration.
+
+- **Lift alone is misleading.** A lift of 10× with only 3 contacts is a statistical
+  ghost. The share tells you this is a *real* group (470 contacts, not 3).
+
+**How it is built:** The `facet_breakdown` function takes the driver edges from
+step 4, groups them by dimension (vendor, fulfillment_type, etc.), and for each
+keeps the top 3 values by share — but only if they represent at least 5% of the
+L5's contacts. Each kept value carries its lift and significance flag forward
+from the driver analysis.
+
+> **Why this helps:** This answers "*Who* is getting hit, and *where* should I
+> focus?" It turns a raw number (1,240 duplicate-charge complaints) into a
+> **profile** of the pain point. You see that more than 1 in 3 complaints come
+> from one vendor, and that vendor is 2.1× over-indexed — a narrow, actionable
+> surface area. Without this, you would see "1,240 duplicate charges" and have no
+> idea where to start.
 
 ---
 
-**7. Systemic bridges** (`systemic.py`) — if `vendor=acme_marketplace` is *also* a
-significant driver for ≥ `BRIDGE_MIN_L5` (=3) other L5s, it is flagged a systemic
-**bridge** (one lever, many pain points) and surfaces at the top of the report.
+**7. Systemic bridges** (`systemic.py`) — after driver analysis, the pipeline
+rolls up every `(dimension, value)` pair and asks: "How many *different* pain
+points does this value drive?"
+
+```
+acme_marketplace drives:
+  • duplicate_charge          (lift 2.1×, verified)
+  • refund_delayed            (lift 1.8×, verified)
+  • wrong_item_shipped        (lift 1.5×, verified)
+  • billing_discrepancy       (lift 1.4×, verified)
+  ─────────────────────────────────────────────────
+  = 4 different L5s  →  flagged as BRIDGE (≥ 3 threshold)
+```
+
+**What is a bridge vs. a singleton?**
+
+| Type | Definition | Example | What to do |
+|------|-----------|---------|-----------|
+| **Bridge** | Significant driver for ≥ 3 L5s | `vendor=acme_marketplace` drives 4 different billing/shipping issues | Fix the vendor relationship once → relief across 4 pain points |
+| **Singleton** | Significant driver for exactly 1 L5 | `payment_method=crypto` drives only `payment_declined` | Fix the specific payment flow |
+
+**Why bridges are surfaced at the top:** They are the highest-leverage fixes.
+A singleton tells you "this specific thing is broken." A bridge tells you
+"this operational lever is broken, and it's making *many* things go wrong."
+Fix the lever once, you relieve multiple pain points.
+
+The **systemic_score** = `(#L5s reached × mean lift)` normalized to [0,1].
+A bridge affecting 4 L5s at 1.8× average lift scores higher than one affecting
+3 L5s at 1.2×. Bridges are sorted by this score so the most impactful levers
+surface first in the report.
 
 ---
 
-**8. Importance tier + trend** (`systemic.py`) — egregiousness `0.8735 ≥ 0.85` →
-tier `very_high`; `z = 2.74 ≥ 2.0` → trend `rising`. These are the warm-start
-curation tags carried across runs.
+**8. Importance tier + trend** (`systemic.py`) — **not a calculation, just a
+lookup table** that buckets already-computed numbers into human-readable labels.
+
+```
+Egregiousness → Importance tier (warm-start curation tag)
+  ≥ 0.85  →  very_high
+  ≥ 0.60  →  high
+  ≥ 0.35  →  fair
+  else    →  low
+
+Z-score → Trend (direction label)
+  ≥  2.0  →  rising   (recent spike)
+  ≤ -2.0  →  falling  (recent drop)
+  else    →  stable   (within normal range)
+```
+
+For this L5: `egregiousness = 0.8735 ≥ 0.85` → `very_high`; `z = 2.74 ≥ 2.0` →
+`rising`. These tags are **carried across runs** as warm-start curation, so the
+system remembers that this pain point was escalating rather than rebuilding the
+ranking from scratch each time.
 
 ---
 
-**9. Verification cache** — each top driver is deterministically re-checked
-(`lift > 1 ∧ support ≥ 30`). `vendor=acme_marketplace` (lift 2.1×, n=470) →
-verdict **verified**; a claim→evidence→verdict record is persisted.
+**9. Verification cache** — after driver analysis, the pipeline takes the top 3
+drivers per L5 and **re-checks them against the raw data** before writing them
+to the report. This is a defense against any bug or edge case that could
+produce a bogus driver.
+
+**What is being validated:**
+
+```
+Claim:  "vendor=acme_marketplace over-indexes for duplicate_charge"
+Evidence: lift=2.1×, support=470, p=0.0003
+Check:    lift > 1  AND  support ≥ 30  AND  significant=True
+Result:   PASS → verdict = "verified"
+```
+
+**What if it fails?** If a driver somehow had `lift = 0.8` (under-indexes),
+`support = 5` (too few contacts), or `significant = False` (not statistically
+sound), the check fails → verdict = "unsupported". That driver is filtered out
+and never surfaces in the report.
+
+**What gets persisted in `gbrain`:**
+
+```
+verification node (SHA1 of claim):
+  - claim:    "vendor=acme_marketplace over-indexes for duplicate_charge"
+  - verdict:  "verified"
+  - detail:   {lift: 2.1, support: 470, p_value: 0.0003, ...}
+  - evidence: ["dim:vendor:acme_marketplace"]
+  - run_id:   "run_2024_05_14_001"
+  - edges:    verifies → pain_point node
+              cites    → dimension node
+```
+
+This creates an **audit trail**. If a stakeholder asks "Why did you say acme
+is a driver?", you point to the verification record. The claim, evidence, and
+verdict are all stored and traceable — not just an assertion in a report.
 
 ---
 
@@ -401,6 +511,13 @@ L5-centric entities:
 - `affects` edges → each driver dimension value (with `lift`, `support`, `p`, history).
 - `dimension` nodes (systemic rollup); `exemplar` nodes; `verification` records.
 - The **run is registered and snapshotted**, so movement across runs is real.
+
+> **Production swap:** `gbrain` is not tied to SQLite. `GBrainStore` is an
+> interface class (`gbrain/store.py`) with methods like `upsert_node`, `add_edge`,
+> `query`, `traverse`. SQLite is the v1 implementation because it is zero-ops,
+> single-file, and Python-native. To scale to millions of conversations, swap in a
+> BigQuery or Neo4j backend by implementing the same interface — only the store
+> class changes; `analytics/`, `agent/`, and `retrieval.py` are untouched.
 
 `run()` returns a summary dict (`run_id`, `period`, counts, `top_egregious`,
 `top_bridges`, `snapshot` path) — passed forward to the report stage.

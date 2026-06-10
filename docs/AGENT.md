@@ -10,6 +10,11 @@ reasoning/synthesis layer** — so a single tool-using ReAct loop keeps LLM call
 is easy to debug, and mirrors the existing web-research agent pattern. (A multi-agent SequentialAgent
 was considered and rejected for now — see `docs/DECISIONS.md`.)
 
+> **Curation cutoffs are configurable.** The report's `top_10 egregious + top_5 spikes`
+> selection is driven by config knobs in `shared/config.py` (e.g.
+> `CURATED_EGREGIOUS_N`, `CURATED_SPIKES_N`), not hard-coded in the agent. This
+> lets you tune report depth without touching agent code.
+
 ## Model
 
 - Primary: **OpenRouter `nvidia/nemotron-3-ultra:free`** via `LiteLlm`.

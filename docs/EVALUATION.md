@@ -10,6 +10,7 @@ How we keep the system correct and trustworthy.
 - **Drivers** — lift/support/p-value correct on a fixed contingency; BH-FDR filters noise; min-support honored.
 - **gbrain** — `upsert_node`/`upsert_edge` idempotency; `affects` edge props update (not duplicate); `traverse` both directions (pain-first + ops-first); snapshot round-trips.
 - **Contract** — `shared/contract.py` accepts a valid BYO dataset and rejects missing columns / broken joins.
+- **Exemplars** — `shared/text.py` BM25 compression produces expected top sentences for a known input; deterministic (same input → same output).
 
 ## Driver-recovery test (methodology validation)
 - `datagen/` plants drivers via its documented model; `analytics/drivers.py` must **recover** them:
